@@ -191,57 +191,101 @@ def run_unroll_process(input_file, quality, target_radius):
 
         print("Processing and transforming entities...")
         processed_count = 0
+
         for entity in msp_in:
-            points = list(get_all_points([entity], tessellation_segments))
-            if points:
-                is_closed = getattr(entity.dxf, "flags", 0) & 1
-                transformed_points = [
-                    transform_point(p, disk_center, scale_factor, target_radius)
-                    for p in points
-                ]
-                if len(transformed_points) >= 2:
-                    msp_out.add_lwpolyline(transformed_points, close=is_closed)
-                    processed_count += 1
+            entity_type = entity.dxftype()
+            is_complex = True
+
+            if entity_type in ["ARC", "CIRCLE"]:
+                if (entity.dxf.center - disk_center).magnitude < 1e-6:
+                    new_y = entity.dxf.radius * scale_factor
+
+                    start_angle = getattr(entity.dxf, 'start_angle', 0)
+                    end_angle = getattr(entity.dxf, 'end_angle', 360)
+
+                    start_angle_rad = np.deg2rad(start_angle)
+                    if start_angle_rad < 0: start_angle_rad += 2 * np.pi
+                    end_angle_rad = np.deg2rad(end_angle)
+                    if end_angle_rad < 0: end_angle_rad += 2 * np.pi
+                    if end_angle_rad < start_angle_rad: end_angle_rad += 2 * np.pi
+
+                    new_x_start = start_angle_rad * target_radius
+                    new_x_end = end_angle_rad * target_radius
+
+                    msp_out.add_line(start=(new_x_start, new_y), end=(new_x_end, new_y))
+                    is_complex = False
+
+            elif entity_type == "LINE":
+                start_vec = entity.dxf.start - disk_center
+                end_vec = entity.dxf.end - disk_center
+                if abs(start_vec.angle_2d - end_vec.angle_2d) < 1e-6:
+                    angle = start_vec.angle_2d
+                    if angle < 0: angle += 2 * np.pi
+
+                    new_x = angle * target_radius
+                    new_y_start = start_vec.magnitude * scale_factor
+                    new_y_end = end_vec.magnitude * scale_factor
+
+                    msp_out.add_line(start=(new_x, new_y_start), end=(new_x, new_y_end))
+                    is_complex = False
+
+            if is_complex:
+                points = list(get_all_points([entity], tessellation_segments))
+                if points:
+                    is_closed = getattr(entity.dxf, "flags", 0) & 1
+                    transformed_points = [transform_point(p, disk_center, scale_factor, target_radius) for p in points]
+                    if len(transformed_points) >= 2:
+                        msp_out.add_lwpolyline(transformed_points, close=is_closed)
+
+            processed_count += 1
+
         print(f"Successfully processed {processed_count} entities.")
 
         # --- 5. Border Creation ---
-        # The process is hardcoded to always create a smart border along the geometry edges.
+        # The process is hardcoded to always create a smart border along geometry edges.
         print("Closing contours along geometry edges...")
         left_points, right_points = [], []
         width = 2 * np.pi * target_radius
         tolerance = 1e-6  # Tolerance for floating point comparisons.
 
         for entity in msp_out:
+            vertices = []
             if entity.dxftype() == "LWPOLYLINE":
                 with entity.points() as points_iterator:
                     vertices = [Vec3(p[0], p[1]) for p in points_iterator]
-                if not vertices:
-                    continue
+            elif entity.dxftype() == "LINE":
+                vertices = [entity.dxf.start, entity.dxf.end]
 
-                first_pt, last_pt = vertices[0], vertices[-1]
+            if not vertices:
+                continue
 
-                # Check if the start/end points of the polyline lie on the left or right boundary.
-                if abs(first_pt.x) < tolerance:
-                    left_points.append(first_pt)
-                if abs(first_pt.x - width) < tolerance:
-                    right_points.append(first_pt)
+            first_pt = vertices[0]
+            last_pt = vertices[-1]
 
-                if not entity.is_closed:
-                    if abs(last_pt.x) < tolerance:
-                        left_points.append(last_pt)
-                    if abs(last_pt.x - width) < tolerance:
-                        right_points.append(last_pt)
+            if abs(first_pt.x) < tolerance:
+                left_points.append(first_pt)
+            elif abs(first_pt.x - width) < tolerance:
+                right_points.append(first_pt)
 
-        # Sort the boundary points by their y-coordinate before connecting them into a line.
+            if first_pt != last_pt:
+                if abs(last_pt.x) < tolerance:
+                    left_points.append(last_pt)
+                elif abs(last_pt.x - width) < tolerance:
+                    right_points.append(last_pt)
+
         left_points.sort(key=lambda p: p.y)
         right_points.sort(key=lambda p: p.y)
 
-        if len(left_points) >= 2:
-            msp_out.add_lwpolyline(left_points)
-            print(f"  - Added left border connecting {len(left_points)} points.")
-        if len(right_points) >= 2:
-            msp_out.add_lwpolyline(right_points)
-            print(f"  - Added right border connecting {len(right_points)} points.")
+        unique_left_points = [p for i, p in enumerate(left_points) if i == 0 or p.y - left_points[i - 1].y > tolerance]
+        unique_right_points = [p for i, p in enumerate(right_points) if
+                               i == 0 or p.y - right_points[i - 1].y > tolerance]
+
+        if len(unique_left_points) >= 2:
+            msp_out.add_lwpolyline(unique_left_points)
+            print(f"  - Added left border connecting {len(unique_left_points)} points.")
+        if len(unique_right_points) >= 2:
+            msp_out.add_lwpolyline(unique_right_points)
+            print(f"  - Added right border connecting {len(unique_right_points)} points.")
 
         # --- 6. Saving ---
         out_doc.saveas(output_file)
@@ -267,7 +311,7 @@ class UnrollerApp:
 
         # Set the window icon using the resource_path helper function.
         try:
-            icon_path = resource_path("icon.png")
+            icon_path = resource_path("pencil.png")
             icon_image = tk.PhotoImage(file=icon_path)
             self.root.iconphoto(True, icon_image)
         except Exception as e:
