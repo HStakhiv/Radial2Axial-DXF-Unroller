@@ -218,8 +218,12 @@ def run_unroll_process(input_file, quality, target_radius):
             elif entity_type == "LINE":
                 start_vec = entity.dxf.start - disk_center
                 end_vec = entity.dxf.end - disk_center
-                if abs(start_vec.angle_2d - end_vec.angle_2d) < 1e-6:
-                    angle = start_vec.angle_2d
+
+                start_angle = np.arctan2(start_vec.y, start_vec.x)
+                end_angle = np.arctan2(end_vec.y, end_vec.x)
+
+                if abs(start_angle - end_angle) < 1e-6:
+                    angle = start_angle
                     if angle < 0: angle += 2 * np.pi
 
                     new_x = angle * target_radius
