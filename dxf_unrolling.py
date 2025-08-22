@@ -145,6 +145,134 @@ def transform_point(
     return Vec3(new_x, new_y, 0)
 
 
+def merge_collinear_lines(msp):
+    """
+    Post-processing step to find and merge connected collinear LINE entities.
+    """
+    print("Post-processing: Merging collinear lines...")
+    from collections import defaultdict
+
+    # Helper function to check if three points are collinear
+    def are_collinear(p1, p2, p3, tol=1e-6):
+        # Using the cross-product method to check for collinearity
+        # It's more robust than comparing slopes.
+        return abs((p2.y - p1.y) * (p3.x - p2.x) - (p2.x - p1.x) * (p3.y - p2.y)) < tol
+
+    lines = list(msp.query("LINE"))
+    if len(lines) < 2:
+        return msp  # Nothing to merge
+
+    # Build a graph of connections
+    # Key: a point (tuple); Value: list of lines connected at that point
+    connections = defaultdict(list)
+    # To handle floating point inaccuracies, we round coordinates for keys
+    precision = 6
+
+    for line in lines:
+        start_pt = tuple(round(c, precision) for c in line.dxf.start)
+        end_pt = tuple(round(c, precision) for c in line.dxf.end)
+        connections[start_pt].append(line)
+        connections[end_pt].append(line)
+
+    processed_lines = set()
+    lines_to_add = []
+    lines_to_delete = set()
+
+    for line in lines:
+        if line in processed_lines:
+            continue
+
+        processed_lines.add(line)
+
+        # Start building a chain from the current line
+        chain = [line]
+
+        # --- Forward search ---
+        current_line = line
+        while True:
+            end_pt_key = tuple(round(c, precision) for c in current_line.dxf.end)
+            candidates = [
+                cand for cand in connections[end_pt_key]
+                if cand is not current_line and cand not in processed_lines
+            ]
+
+            if len(candidates) == 1:
+                next_line = candidates[0]
+                # Ensure the connection is end-to-start
+                if Vec3(end_pt_key).isclose(next_line.dxf.start):
+                    chain.append(next_line)
+                    current_line = next_line
+                    processed_lines.add(current_line)
+                else:
+                    break  # Connection is not end-to-start
+            else:
+                break  # No unique connection found
+
+        # --- Backward search ---
+        current_line = line
+        while True:
+            start_pt_key = tuple(round(c, precision) for c in current_line.dxf.start)
+            candidates = [
+                cand for cand in connections[start_pt_key]
+                if cand is not current_line and cand not in processed_lines
+            ]
+
+            if len(candidates) == 1:
+                prev_line = candidates[0]
+                # Ensure the connection is start-to-end
+                if Vec3(start_pt_key).isclose(prev_line.dxf.end):
+                    chain.insert(0, prev_line)
+                    current_line = prev_line
+                    processed_lines.add(current_line)
+                else:
+                    break  # Connection is not start-to-end
+            else:
+                break  # No unique connection found
+
+        # Now, process the found chain for collinear segments
+        if len(chain) > 1:
+            lines_to_delete.update(chain)  # Mark the whole chain for deletion
+
+            collinear_group = [chain[0]]
+            for i in range(1, len(chain)):
+                prev = collinear_group[-1]
+                curr = chain[i]
+
+                # Check for collinearity
+                if are_collinear(prev.dxf.start, prev.dxf.end, curr.dxf.end):
+                    collinear_group.append(curr)
+                else:
+                    # Merge the previous group and start a new one
+                    merged_start = collinear_group[0].dxf.start
+                    merged_end = collinear_group[-1].dxf.end
+                    lines_to_add.append({'start': merged_start, 'end': merged_end})
+                    collinear_group = [curr]
+
+            # Merge the last group
+            merged_start = collinear_group[0].dxf.start
+            merged_end = collinear_group[-1].dxf.end
+            lines_to_add.append({'start': merged_start, 'end': merged_end})
+        else:
+            # If the chain has only one line, it's not part of a merge
+            lines_to_add.append({'start': line.dxf.start, 'end': line.dxf.end})
+            lines_to_delete.add(line)
+
+    # Perform the final update on the modelspace
+    if lines_to_delete:
+        print(f"  - Merging {len(lines_to_delete)} lines into {len(lines_to_add)}...")
+        # Delete old lines
+        for line in lines_to_delete:
+            try:
+                msp.delete_entity(line)
+            except:  # Ignore if already deleted
+                pass
+                # Add new, merged lines
+        for line_data in lines_to_add:
+            msp.add_line(start=line_data['start'], end=line_data['end'])
+
+    return msp
+
+
 def run_unroll_process(input_file, quality, target_radius):
     """
     Orchestrates the entire DXF unrolling process from file loading to saving.
@@ -244,6 +372,8 @@ def run_unroll_process(input_file, quality, target_radius):
             processed_count += 1
 
         print(f"Successfully processed {processed_count} entities.")
+
+        msp_out = merge_collinear_lines(msp_out)
 
         # --- 5. Border Creation ---
         # The process is hardcoded to always create a smart border along geometry edges.
